@@ -16,7 +16,7 @@ world_points = {
 H = None  # Homography matrix
 
 # Webcam openen (0 = standaard camera)
-cap = cv2.VideoCapture(0)
+cap = cv2.VideoCapture(1)
 
 if not cap.isOpened():
     print("Kan camera niet openen")
