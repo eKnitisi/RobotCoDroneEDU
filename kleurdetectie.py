@@ -2,15 +2,16 @@ import cv2
 import numpy as np
 
 # ---------- Configuratie ----------
-VIDEO_SOURCE = 0
+VIDEO_SOURCE = 1
 SHOW_DEBUG = True
 MIN_CONTOUR_AREA = 200  # Kleinere waarde voor test
 
 # HSV ranges
-# Rood (wrap-around)
-LOWER_RED_1 = np.array([0, 120, 70])
+# Rood LED (zwak licht) - bredere, minder strikte range
+LOWER_RED_1 = np.array([0, 50, 50])      # H, S, V lager
 UPPER_RED_1 = np.array([10, 255, 255])
-LOWER_RED_2 = np.array([170, 120, 70])
+
+LOWER_RED_2 = np.array([170, 50, 50])
 UPPER_RED_2 = np.array([180, 255, 255])
 
 # Groen
@@ -78,7 +79,7 @@ def apply_homography(H, pt):
 # ---------- Main loop ----------
 def main():
     global H
-    cap = cv2.VideoCapture(VIDEO_SOURCE)
+    cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
     if not cap.isOpened():
         print("Kon camera niet openen")
         return
