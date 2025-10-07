@@ -6,6 +6,11 @@ import keyboard
 import time
 import sys
 from codrone_edu.swarm import *
+from threading import Thread, Lock
+
+# --- Globale dronepositie ---
+drone_position = {"x": None, "y": None}
+position_lock = Lock()
 
 # === CONFIG ===
 POWER = 30        # snelheid (0–100)
@@ -15,9 +20,10 @@ MIN_CONTOUR_AREA = 200
 SHOW_DEBUG = True
 TOLERANCE = 0.05   # tolerantie in meters voor positie correctie
 
-# Lijst met waypoints (in meters)
+# Lijst met waypoints (meters) — schaalbaar
 waypoints = [
-    (1.0, 1.0)  # voorlopig één punt, later meer toevoegen
+    (1.0, 1.0),  # voorbeeldpunt
+    # later kun je hier meer punten toevoegen
 ]
 
 # === STag wereldcoördinaten (meters) ===
@@ -45,7 +51,7 @@ def watch_for_q():
             kill = True
             try:
                 print("Drone gaat veilig landen...")
-                swarm.land()  # zachte landing
+                swarm.land()
             except Exception as e:
                 print("⚠️ Fout tijdens noodstop-landing:", e)
             finally:
@@ -53,8 +59,7 @@ def watch_for_q():
             break
         time.sleep(0.1)
 
-
-# === Drone-setup ===
+# === Drone setup ===
 swarm = Swarm()
 swarm.connect()
 
@@ -92,6 +97,44 @@ def apply_homography(H, pt):
     dst /= dst[2, 0]
     return float(dst[0, 0]), float(dst[1, 0])
 
+def track_drone_position(H):
+    global kill, drone_position
+    cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+    if not cap.isOpened():
+        print("❌ Kan camera niet openen (tracking thread).")
+        return
+
+    while not kill:
+        ret, frame = cap.read()
+        if not ret:
+            continue
+
+        red_objs, _ = detect_red_objects(frame)
+        if H is not None and red_objs:
+            cx, cy, area = max(red_objs, key=lambda x: x[2])
+            X_curr, Y_curr = apply_homography(H, (cx, cy))
+
+            # Beschermde update van de globale variabele
+            with position_lock:
+                drone_position["x"] = X_curr
+                drone_position["y"] = Y_curr
+
+            # Debug beeld
+            cv2.circle(frame, (cx, cy), 8, (0, 0, 255), -1)
+            cv2.putText(frame, f"X={X_curr:.2f} Y={Y_curr:.2f} m", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+
+            cv2.imshow("Drone Tracker", frame)
+        else:
+            cv2.imshow("Drone Tracker", frame)
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            kill = True
+            break
+
+    cap.release()
+    cv2.destroyWindow("Drone Tracker")
+
 
 # === MAIN LOOP ===
 def main():
@@ -102,7 +145,10 @@ def main():
         return
 
     H = None
-    print("Start. Druk 'c' voor calibratie, 'm' om autonoom +1m X te bewegen, 'q' voor noodstop.")
+    waypoint_mode = False
+    current_waypoint = 0
+
+    print("Start. Druk 'c' voor calibratie, 'm' om waypoint modus te starten, 'q' voor noodstop.")
 
     while True:
         ret, frame = cap.read()
@@ -112,40 +158,35 @@ def main():
         # --- Detectie rode drone ---
         frame_for_detection = frame.copy()
         red_objs, red_mask = detect_red_objects(frame_for_detection)
-        drone_world_coords = {}
-
+        X_curr, Y_curr = None, None
         if H is not None and red_objs:
             cx, cy, area = max(red_objs, key=lambda x: x[2])
-            X, Y = apply_homography(H, (cx, cy))
-            drone_world_coords["red"] = (X, Y)
+            X_curr, Y_curr = apply_homography(H, (cx, cy))
             cv2.circle(frame, (cx, cy), 8, (0,0,255), -1)
-            cv2.putText(frame, f"red: ({X:.2f},{Y:.2f}) m", (10, 30),
+            cv2.putText(frame, f"red: ({X_curr:.2f},{Y_curr:.2f}) m", (10, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
 
-        # --- Detecteer markers zonder ID's ---
+        # --- Detecteer markers ---
         corners, ids, _ = stag.detectMarkers(frame, libraryHD)
         if ids is not None:
             stag.drawDetectedMarkers(frame, corners, ids)
 
-        # --- Teken verticale lijnen als H bekend is ---
+        # --- Teken verticale lijnen ---
         if H is not None:
             step = 0.5
             min_x = min(pt[0] for pt in world_points.values())
             max_x = max(pt[0] for pt in world_points.values())
             max_y = max(pt[1] for pt in world_points.values())
             H_inv = np.linalg.inv(H)
-
             for x in np.arange(min_x, max_x + step, step):
                 top = np.array([[x, 0, 1]]).T
                 bottom = np.array([[x, max_y, 1]]).T
-                px_top = H_inv.dot(top)
-                px_top /= px_top[2, 0]
-                px_bottom = H_inv.dot(bottom)
-                px_bottom /= px_bottom[2, 0]
+                px_top = H_inv.dot(top); px_top /= px_top[2,0]
+                px_bottom = H_inv.dot(bottom); px_bottom /= px_bottom[2,0]
                 cv2.line(frame,
-                        (int(px_top[0, 0]), int(px_top[1, 0])),
-                        (int(px_bottom[0, 0]), int(px_bottom[1, 0])),
-                        (0, 255, 0), 1)
+                         (int(px_top[0,0]), int(px_top[1,0])),
+                         (int(px_bottom[0,0]), int(px_bottom[1,0])),
+                         (0,255,0),1)
 
         # --- Debug weergave ---
         if SHOW_DEBUG:
@@ -166,52 +207,50 @@ def main():
                     center = np.mean(c, axis=0)
                     image_pts.append(center)
                     world_pts.append(world_points[marker_id])
-
             if len(image_pts) >= 4:
                 H, _ = cv2.findHomography(np.array(image_pts), np.array(world_pts))
                 np.save("homography.npy", H)
                 print("Homografie berekend en opgeslagen.")
 
-        # --- Hover mode na 'm' ---
-        if key == ord('m') and not kill:
+                # Start tracking thread
+                tracker_thread = Thread(target=track_drone_position, args=(H,), daemon=True)
+                tracker_thread.start()
+
+        # --- Start waypoint modus ---
+        if key == ord('m') and not kill and not waypoint_mode:
             if H is None:
                 print("⚠️ Eerst 'c' drukken voor calibratie!")
-                continue
+            else:
+                print("\n=== Drone opstijgen en hoveren (waypoint modus) ===")
+                swarm.takeoff()
+                swarm.hover(0.5)
+                waypoint_mode = True
+                current_waypoint = 0
 
-            print("\n=== Drone opstijgen en hoveren ===")
-            swarm.takeoff()
-            swarm.hover(0.5)  # opstijgen en stabiliseren
+        # --- Hoofdloop waypoint update ---
+        if waypoint_mode and X_curr is not None and Y_curr is not None and current_waypoint < len(waypoints):
+            X_target, Y_target = waypoints[current_waypoint]
+            error_X = X_target - X_curr
+            error_Y = Y_target - Y_curr
 
-            # Blijf frames lezen en drone positie tonen
-            while not kill:
-                ret, frame = cap.read()
-                if not ret:
-                    continue
+            # Terminal-output
+            print(f"Huidige positie -> X: {X_curr:.2f}, Y: {Y_curr:.2f} m | Doel: ({X_target:.2f},{Y_target:.2f})", end='\r', flush=True)
 
-                red_objs, _ = detect_red_objects(frame)
-                if red_objs:
-                    cx, cy, area = max(red_objs, key=lambda x: x[2])
-                    X_curr, Y_curr = apply_homography(H, (cx, cy))
-                    
-                    # Terminal-output
-                    print(f"Huidige positie -> X: {X_curr:.2f} m, Y: {Y_curr:.2f} m", end='\r', flush=True)
+            # Kleine stapjes
+            step = 0.05  # 5 cm per stap
+            dx = np.clip(error_X, -step, step)
+            dy = np.clip(error_Y, -step, step)
 
-                    # Overlay op debug scherm
-                    cv2.circle(frame, (cx, cy), 8, (0, 0, 255), -1)
-                    cv2.putText(frame, f"X: {X_curr:.2f}, Y: {Y_curr:.2f}", (10, 30),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
-                else:
-                    print("⚠️ Drone niet zichtbaar...                                ", end='\r', flush=True)
+            if abs(error_X) > TOLERANCE or abs(error_Y) > TOLERANCE:
+                swarm.move_distance(dx, dy, 0, 0.5)
+                time.sleep(0.2)  # korte pauze zodat drone kan bewegen
+            else:
+                print(f"\n✅ Waypoint {current_waypoint+1} bereikt!")
+                current_waypoint += 1
+                swarm.hover(0.5)
 
-                if SHOW_DEBUG:
-                    cv2.imshow("Frame", frame)
-                    if cv2.waitKey(1) & 0xFF == ord('q'):
-                        kill = True
-                        break
-
-    swarm.hover(0.5)  # Houd hover als exit
-
-    
+        # Blijf hoveren als exit
+        swarm.hover(0.5)
     cap.release()
     cv2.destroyAllWindows()
     sys.exit()
@@ -220,12 +259,15 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except (KeyboardInterrupt, Exception):
-        print("\n>>> KeyboardInterrupt: drone gaat veilig landen <<<")
+    except KeyboardInterrupt:
+        print("\n>>> KeyboardInterrupt: drone gaat veilig landen <<<", e)
         try:
             swarm.land()
         except Exception as e:
             print("⚠️ Fout tijdens zachte noodlanding:", e)
-        finally:
-            swarm.disconnect()
+    except Exception as e:
+        print("exception: ", e)
+    finally:
+        swarm.land
+        swarm.disconnect()
         sys.exit()
