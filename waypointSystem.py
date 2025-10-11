@@ -218,6 +218,7 @@ if __name__ == "__main__":
         except Exception as e:
             print("⚠️ Fout tijdens zachte noodlanding:", e)
     except Exception as e:
+        swarm.land()
         print("exception: ", e)
     finally:
         swarm.land
