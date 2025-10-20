@@ -14,10 +14,10 @@ swarm.connect()  # detecteert automatisch de drones
 
 # === Hoeken van het kleinere vierkant (wereldcoördinaten in meter) ===
 corners = [
-    (0.4, 0.3),   # hoek A
+    (0.25, 0.5),   # hoek A
     (1.4, 0.27),  # hoek B
     (1.47, 1.15), # hoek C
-    (0.25, 1.2)    # hoek D
+    (0.25, 1.3)    # hoek D
 ]
 
 # Beginposities per dronekleur (hoekindex)
@@ -75,26 +75,55 @@ def is_corner_free(corner, all_positions, threshold=0.6):
     return True
 
 
+DESTINATION_THRESHOLD = 0.1  # 10 cm
+STEP_SIZE = 0.3              # maximale stap per move_distance (m)
+
+DESTINATION_THRESHOLD = 0.20  # 20 cm
+STEP_SIZE = 0.2  # max 20 cm per stap
+
 def move_drone_to(color, next_corner_idx):
-    """Verplaats een drone naar de volgende hoek met move_distance()."""
+    """Verplaats een drone naar de volgende hoek, richting berekend vanuit huidige positie (RabbitMQ) met aangepaste stapgrootte."""
     try:
         idx = {"red": 0, "blue": 1}[color]
-        current_idx = drone_corners[color]
-        current_pos = corners[current_idx]
-        target = corners[next_corner_idx]
+        target = np.array(corners[next_corner_idx])
+        dz = 0
+        speed = 0.2
 
-        # Bereken afstanden
-        dx = target[1] - current_pos[1]        # vooruit/achteruit (wereld Y → drone X)
-        dy = current_pos[0] - target[0]        # links/rechts (wereld X → drone Y, teken omgedraaid)
-        dz = 0                                 # geen hoogteverandering
-        speed = 0.1                            # zeer traag
+        # Startpositie logging
+        start_idx = drone_corners[color]
+        start_coords = drone_positions[color] if drone_positions[color] is not None else np.array([-1, -1])
+        print(f"🛫 {color} start van hoek {start_idx} ({start_coords}) naar hoek {next_corner_idx} ({target})")
 
-        print(f"🟢 {color} beweegt van hoek {current_idx} naar hoek {next_corner_idx} → {current_pos} => {target}")
-        print(f"dx: {dx} dy: {dy}")
-        swarm[idx].move_distance(dx, dy, dz, speed)
+        while not kill:
+            current_pos = drone_positions[color]
+            if current_pos is None:
+                print(f"⚠️ Huidige positie van {color} onbekend, wacht...")
+                time.sleep(0.1)
+                continue
 
-        # Update hoekindex
-        drone_corners[color] = next_corner_idx
+            # Bereken vector richting bestemming
+            delta = target - current_pos
+            distance = np.linalg.norm(delta)
+
+            if distance <= DESTINATION_THRESHOLD:
+                print(f"✅ {color} heeft bestemming bereikt (afstand {distance:.3f} m), hover op {target}")
+                swarm[idx].hover()
+                drone_corners[color] = next_corner_idx
+                return
+
+            # Dynamische stap: kleiner als de drone dichterbij is
+            dynamic_step = min(STEP_SIZE, distance)  # max STEP_SIZE of resterende afstand
+            step_vector = delta * (dynamic_step / distance)
+
+            # Drone X = vooruit/achteruit → wereld Y
+            dx = step_vector[1]
+            # Drone Y = links/rechts → wereld X (omgedraaid)
+            dy = -step_vector[0]
+
+            print(f"🟢 {color} beweegt stap dx={dx:.3f}, dy={dy:.3f}, huidige pos={current_pos}, afstand tot doel={distance:.3f}")
+            swarm[idx].move_distance(dx, dy, dz, speed)
+
+            time.sleep(0.05)  # kleine pauze voor RabbitMQ update
 
     except Exception as e:
         print(f"⚠️ Fout bij bewegen van {color}: {e}")
@@ -172,13 +201,18 @@ def main():
             current_idx = drone_corners[color]
             next_idx = (current_idx + 1) % 4
 
-            if is_corner_free(corners[next_idx], drone_positions):
+            # Beweeg drone meerdere hoeken achter elkaar zolang de volgende hoek vrij is
+            while is_corner_free(corners[next_idx], drone_positions):
                 move_drone_to(color, next_idx)
-            else:
-                print(f"🔴 {color} wacht: hoek {next_idx} is bezet.")
+                current_idx = next_idx
+                next_idx = (current_idx + 1) % 4
 
+            print(f"🔴 {color} wacht: volgende hoek {next_idx} is bezet of niet vrij.")
+
+            # Beurt gaat naar de volgende drone
             current_turn = (current_turn + 1) % len(move_order)
-            time.sleep(3)
+            time.sleep(0.5)  # korte pauze voordat volgende drone aan de beurt is
+
 
     except KeyboardInterrupt:
         print("\nCTRL+C gedetecteerd, landt drones...")
