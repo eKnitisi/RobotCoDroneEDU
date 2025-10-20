@@ -74,12 +74,10 @@ def is_corner_free(corner, all_positions, threshold=0.6):
             return False
     return True
 
-
-DESTINATION_THRESHOLD = 0.1  # 10 cm
-STEP_SIZE = 0.3              # maximale stap per move_distance (m)
+             # maximale stap per move_distance (m)
 
 DESTINATION_THRESHOLD = 0.20  # 20 cm
-STEP_SIZE = 0.2  # max 20 cm per stap
+STEP_SIZE = 0.05  # max 5 cm per stap
 
 def move_drone_to(color, next_corner_idx):
     """Verplaats een drone naar de volgende hoek, richting berekend vanuit huidige positie (RabbitMQ) met aangepaste stapgrootte."""
@@ -104,6 +102,8 @@ def move_drone_to(color, next_corner_idx):
             # Bereken vector richting bestemming
             delta = target - current_pos
             distance = np.linalg.norm(delta)
+            distance_x = delta[0]
+            distance_y = delta[1]
 
             if distance <= DESTINATION_THRESHOLD:
                 print(f"✅ {color} heeft bestemming bereikt (afstand {distance:.3f} m), hover op {target}")
@@ -111,8 +111,8 @@ def move_drone_to(color, next_corner_idx):
                 drone_corners[color] = next_corner_idx
                 return
 
-            # Dynamische stap: kleiner als de drone dichterbij is
-            dynamic_step = min(STEP_SIZE, distance)  # max STEP_SIZE of resterende afstand
+            # Dynamische stap — max 5 cm, of minder als dichterbij
+            dynamic_step = min(STEP_SIZE, distance)
             step_vector = delta * (dynamic_step / distance)
 
             # Drone X = vooruit/achteruit → wereld Y
@@ -120,14 +120,15 @@ def move_drone_to(color, next_corner_idx):
             # Drone Y = links/rechts → wereld X (omgedraaid)
             dy = -step_vector[0]
 
-            print(f"🟢 {color} beweegt stap dx={dx:.3f}, dy={dy:.3f}, huidige pos={current_pos}, afstand tot doel={distance:.3f}")
+            print(f"🟢 {color} beweegt stap dx={dx:.3f}, dy={dy:.3f}, Δx={distance_x:.3f}, Δy={distance_y:.3f}, afstand={distance:.3f}")
             swarm[idx].move_distance(dx, dy, dz, speed)
 
-            time.sleep(0.05)  # kleine pauze voor RabbitMQ update
+            time.sleep(0.2)  # kleine pauze voor RabbitMQ update
 
     except Exception as e:
         print(f"⚠️ Fout bij bewegen van {color}: {e}")
         safe_land()
+
 
 
 
@@ -181,7 +182,7 @@ def main():
         if hover_mode and not kill:
             print("🚀 Drones stijgen op en blijven hoveren...")
             swarm.takeoff()
-            swarm.hover(3)
+            swarm.hover()
             print("Drones hoveren. Druk op 'm' om te bewegen.")
 
         # Wachten op beweging ("m")
